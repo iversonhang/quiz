@@ -66,7 +66,7 @@ def generate_quiz(text, subject):
     
     try:
         # --- FIX IS HERE: Changed model name to the specific version ---
-        model = genai.GenerativeModel('gemini-1.5-flash-001') 
+        model = genai.GenerativeModel('gemini-pro') 
         response = model.generate_content(prompt)
         
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
@@ -138,3 +138,4 @@ if st.session_state.quiz_data:
 
 elif not api_key:
     st.warning("👈 Please enter your Google API Key in the sidebar to start.")
+
