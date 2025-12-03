@@ -5,7 +5,6 @@ import sqlite3
 import time
 import tempfile
 import os
-import time
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Pro Quiz Portal", page_icon="🎓", layout="wide")
@@ -67,12 +66,25 @@ def get_db_stats():
     conn.close()
     return stats
 
-# --- GEMINI VISION ---
+# --- GEMINI VISION (UPDATED PROMPT) ---
 def generate_batch_with_vision(gemini_file, subject, model_name, batch_num):
+    # Specialized instructions for English Grammar
+    english_rules = ""
+    if "English" in subject:
+        english_rules = """
+        IMPORTANT FOR ENGLISH SUBJECT:
+        - Focus STRICTLY on Grammar.
+        - Question Types: Tenses, Prepositions, Phrasal Verbs, and Collocations.
+        - Format: Create "Fill-in-the-blank" style questions or "Identify the error" questions based on sentences found in the text.
+        - Do NOT ask general reading comprehension questions (e.g., "What is the main idea?").
+        """
+
     prompt = f"""
     Role: Strict Teacher. Subject: {subject}.
     Task: Create 10 CHALLENGING multiple-choice questions based on the uploaded document.
     Batch: {batch_num} of 4.
+    
+    {english_rules}
     
     CRITICAL INSTRUCTION FOR MATH/SCIENCE:
     If the question involves formulas, equations, or special symbols, YOU MUST use LaTeX formatting enclosed in dollar signs.
@@ -80,22 +92,21 @@ def generate_batch_with_vision(gemini_file, subject, model_name, batch_num):
     Examples:
     - Write "x squared" as: $ x^2 $
     - Write "fractions" as: $ \\frac{{1}}{{2}} $
-    - Write "square root" as: $ \\sqrt{{x}} $
     
     Rules:
     1. Output JSON Array ONLY.
     2. Language: 
-       - Math/Science: Traditional Chinese questions, but use LaTeX for ALL numbers/formulas.
+       - Math/Science: Traditional Chinese questions + LaTeX formulas.
        - Chinese/Humanities: Traditional Chinese.
-       - English: English.
+       - English: English (Focus on Grammar/Tenses/Prepositions).
     
     JSON Structure:
     [
       {{
-        "question": "Calculate the integral: $ \\int x dx $",
-        "options": ["$ x^2 $", "$ \\frac{{x^2}}{{2}} + C $", "$ 2x $", "$ x $"],
-        "answer": "$ \\frac{{x^2}}{{2}} + C $",
-        "explanation": "Using the power rule..."
+        "question": "Choose the correct preposition: The meeting was called ___ due to rain.",
+        "options": ["off", "out", "for", "in"],
+        "answer": "off",
+        "explanation": "'Call off' is a phrasal verb meaning to cancel."
       }}
     ]
     """
@@ -112,9 +123,13 @@ def generate_batch_with_vision(gemini_file, subject, model_name, batch_num):
 # --- MAIN APP UI ---
 init_db()
 
-# Session State Initialization
+# Initialize Session State
 if "quiz_session_id" not in st.session_state:
     st.session_state.quiz_session_id = 0
+if "current_quiz" not in st.session_state:
+    st.session_state.current_quiz = []
+if "quiz_submitted" not in st.session_state:
+    st.session_state.quiz_submitted = False
 
 with st.sidebar:
     st.title("⚙️ Settings")
@@ -175,7 +190,6 @@ with tab1:
             try:
                 sample_file = genai.upload_file(path=tmp_path, display_name="Class Notes")
                 
-                # Poll for processing
                 while sample_file.state.name == "PROCESSING":
                     time.sleep(1)
                     sample_file = genai.get_file(sample_file.name)
@@ -211,42 +225,28 @@ with tab2:
     with col1:
         st.header("Practice Mode")
     with col2:
-        # Subject Selector for Quiz
         quiz_subject = st.selectbox("Select Subject", ["中文 (Chinese)", "英文 (English)", "數學 (Math)", "人文科學 (Humanities)"], key="quiz_sub")
 
-    # Initialize State
-    if "current_quiz" not in st.session_state:
-        st.session_state.current_quiz = []
-    if "quiz_submitted" not in st.session_state:
-        st.session_state.quiz_submitted = False
-
-    # START BUTTON
-    if st.button("🎲 Start New Quiz (20 Qs)"):
-        # 1. Fetch Questions
+    if st.button("🎲 Start Random Quiz (20 Qs)"):
         questions = get_random_quiz(quiz_subject, limit=20)
         
         if not questions:
             st.warning("No questions found. Please upload notes first.")
         else:
-            # 2. RESET EVERYTHING
+            # RESET EVERYTHING
             st.session_state.current_quiz = questions
             st.session_state.quiz_submitted = False
-            # 3. UPDATE SESSION ID (This forces all radio buttons to reset)
             st.session_state.quiz_session_id = int(time.time())
             st.rerun()
 
-    # DISPLAY QUIZ
     if st.session_state.current_quiz:
         st.divider()
         st.markdown(f"#### 📝 {quiz_subject} Assessment")
         
         with st.form("quiz_form"):
             for idx, q in enumerate(st.session_state.current_quiz):
-                # RENDER QUESTION (Markdown supports LaTeX)
                 st.markdown(f"**{idx+1}. {q['question']}**")
                 
-                # RENDER OPTIONS
-                # We append quiz_session_id to the key to force a hard reset
                 st.radio(
                     "Select Answer:", 
                     q['options'], 
@@ -261,7 +261,6 @@ with tab2:
                 st.session_state.quiz_submitted = True
                 st.rerun()
 
-        # RESULTS
         if st.session_state.quiz_submitted:
             score = 0
             total = len(st.session_state.current_quiz)
@@ -270,24 +269,25 @@ with tab2:
             st.subheader("📊 Results")
             
             for idx, q in enumerate(st.session_state.current_quiz):
-                # Retrieve user answer using the dynamic key
                 u_ans = st.session_state.get(f"q{idx}_{st.session_state.quiz_session_id}")
                 c_ans = q['answer']
                 
-                if u_ans == c_ans:
-                    score += 1
-                    st.success(f"Q{idx+1}: Correct")
-                else:
-                    st.error(f"Q{idx+1}: Incorrect")
-                    # Use LaTeX columns to show math clearly
+                with st.container():
+                    if u_ans == c_ans:
+                        score += 1
+                        st.success(f"**Q{idx+1}: Correct!**")
+                    else:
+                        st.error(f"**Q{idx+1}: Incorrect**")
+                        
                     c1, c2 = st.columns(2)
-                    with c1: 
+                    with c1:
                         st.markdown("**Your Answer:**")
-                        st.markdown(u_ans if u_ans else "None")
+                        st.markdown(u_ans if u_ans else "No Answer")
                     with c2:
                         st.markdown("**Correct Answer:**")
                         st.markdown(c_ans)
                     
                     st.info(f"**Explanation:** {q['explanation']}")
+                    st.markdown("---")
             
             st.metric("Final Score", f"{score}/{total}", f"{int(score/total*100)}%")
