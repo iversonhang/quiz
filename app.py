@@ -1,112 +1,134 @@
 import streamlit as st
 import google.generativeai as genai
 import json
-import sqlite3
+import psycopg2
+import os
 import time
 import tempfile
-import os
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Pro Quiz Portal", page_icon="🎓", layout="wide")
 
-# --- DATABASE FUNCTIONS ---
+# --- DATABASE CONNECTION (SUPABASE) ---
+def get_db_connection():
+    """Connect to Supabase using the URL from secrets."""
+    try:
+        # Load URL from secrets.toml
+        return psycopg2.connect(st.secrets["DB_URL"])
+    except Exception as e:
+        st.error(f"Database Connection Failed: {e}")
+        return None
+
 def init_db():
-    conn = sqlite3.connect('quiz.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS questions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            subject TEXT,
-            question TEXT,
-            options TEXT,
-            answer TEXT,
-            explanation TEXT,
-            source_file TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    conn = get_db_connection()
+    if conn:
+        cur = conn.cursor()
+        # Create table (Postgres syntax)
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS questions (
+                id SERIAL PRIMARY KEY,
+                subject TEXT,
+                question TEXT,
+                options TEXT,
+                answer TEXT,
+                explanation TEXT,
+                source_file TEXT
+            )
+        ''')
+        conn.commit()
+        cur.close()
+        conn.close()
 
 def save_questions_to_db(questions, subject, filename):
-    conn = sqlite3.connect('quiz.db')
-    c = conn.cursor()
+    conn = get_db_connection()
+    if not conn: return 0
+    
+    cur = conn.cursor()
     count = 0
     for q in questions:
         if 'question' in q and 'options' in q and 'answer' in q:
-            # Ensure options are stringified JSON
             options_str = json.dumps(q['options'])
-            c.execute('''
+            # Postgres uses %s for placeholders (unlike SQLite's ?)
+            cur.execute('''
                 INSERT INTO questions (subject, question, options, answer, explanation, source_file)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
             ''', (subject, q['question'], options_str, q['answer'], q.get('explanation', ''), filename))
             count += 1
     conn.commit()
+    cur.close()
     conn.close()
     return count
 
 def get_random_quiz(subject, limit=20):
-    conn = sqlite3.connect('quiz.db')
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute('SELECT * FROM questions WHERE subject = ? ORDER BY RANDOM() LIMIT ?', (subject, limit))
-    rows = c.fetchall()
+    conn = get_db_connection()
+    if not conn: return []
+    
+    cur = conn.cursor()
+    # Postgres RANDOM() function works same as SQLite
+    cur.execute('''
+        SELECT question, options, answer, explanation 
+        FROM questions 
+        WHERE subject = %s 
+        ORDER BY RANDOM() 
+        LIMIT %s
+    ''', (subject, limit))
+    
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
+    
     return [{
-        'question': row['question'],
-        'options': json.loads(row['options']),
-        'answer': row['answer'],
-        'explanation': row['explanation']
+        'question': row[0],
+        'options': json.loads(row[1]),
+        'answer': row[2],
+        'explanation': row[3]
     } for row in rows]
 
 def get_db_stats():
-    conn = sqlite3.connect('quiz.db')
-    c = conn.cursor()
-    c.execute("SELECT subject, COUNT(*) FROM questions GROUP BY subject")
-    stats = c.fetchall()
+    conn = get_db_connection()
+    if not conn: return []
+    cur = conn.cursor()
+    cur.execute("SELECT subject, COUNT(*) FROM questions GROUP BY subject")
+    stats = cur.fetchall()
+    cur.close()
     conn.close()
     return stats
 
-# --- GEMINI VISION (UPDATED PROMPT) ---
+def clear_db():
+    conn = get_db_connection()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM questions")
+        conn.commit()
+        cur.close()
+        conn.close()
+
+# --- GEMINI AI LOGIC (Same as before) ---
 def generate_batch_with_vision(gemini_file, subject, model_name, batch_num):
-    # Specialized instructions for English Grammar
+    # Specialized instructions
     english_rules = ""
     if "English" in subject:
         english_rules = """
-        IMPORTANT FOR ENGLISH SUBJECT:
-        - Focus STRICTLY on Grammar.
-        - Question Types: Tenses, Prepositions, Phrasal Verbs, and Collocations.
-        - Format: Create "Fill-in-the-blank" style questions or "Identify the error" questions based on sentences found in the text.
-        - Do NOT ask general reading comprehension questions (e.g., "What is the main idea?").
+        IMPORTANT FOR ENGLISH: Focus STRICTLY on Grammar (Tenses, Prepositions, Phrasal Verbs).
+        Format: "Fill-in-the-blank" or "Identify error". No reading comprehension.
         """
 
     prompt = f"""
     Role: Strict Teacher. Subject: {subject}.
-    Task: Create 10 CHALLENGING multiple-choice questions based on the uploaded document.
+    Task: Create 10 CHALLENGING multiple-choice questions.
     Batch: {batch_num} of 4.
     
     {english_rules}
     
-    CRITICAL INSTRUCTION FOR MATH/SCIENCE:
-    If the question involves formulas, equations, or special symbols, YOU MUST use LaTeX formatting enclosed in dollar signs.
-    
-    Examples:
-    - Write "x squared" as: $ x^2 $
-    - Write "fractions" as: $ \\frac{{1}}{{2}} $
-    
-    Rules:
-    1. Output JSON Array ONLY.
-    2. Language: 
-       - Math/Science: Traditional Chinese questions + LaTeX formulas.
-       - Chinese/Humanities: Traditional Chinese.
-       - English: English (Focus on Grammar/Tenses/Prepositions).
+    CRITICAL: Use LaTeX ($...$) for math formulas.
     
     JSON Structure:
     [
       {{
-        "question": "Choose the correct preposition: The meeting was called ___ due to rain.",
-        "options": ["off", "out", "for", "in"],
-        "answer": "off",
-        "explanation": "'Call off' is a phrasal verb meaning to cancel."
+        "question": "...",
+        "options": ["A", "B", "C", "D"],
+        "answer": "Correct Answer",
+        "explanation": "Brief explanation."
       }}
     ]
     """
@@ -123,7 +145,6 @@ def generate_batch_with_vision(gemini_file, subject, model_name, batch_num):
 # --- MAIN APP UI ---
 init_db()
 
-# Initialize Session State
 if "quiz_session_id" not in st.session_state:
     st.session_state.quiz_session_id = 0
 if "current_quiz" not in st.session_state:
@@ -140,14 +161,13 @@ with st.sidebar:
         genai.configure(api_key=api_key)
         try:
             models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            # Prefer flash model
             default_ix = next((i for i, m in enumerate(models) if "flash" in m), 0)
             selected_model = st.selectbox("AI Model", models, index=default_ix)
         except:
             st.error("Invalid Key")
 
     st.divider()
-    st.write("📊 **Database Stats**")
+    st.write("📊 **Cloud Database Stats**")
     stats = get_db_stats()
     if stats:
         for s in stats:
@@ -155,11 +175,8 @@ with st.sidebar:
     else:
         st.write("No questions yet.")
         
-    if st.button("🗑️ Clear All Questions"):
-        conn = sqlite3.connect('quiz.db')
-        conn.execute("DELETE FROM questions")
-        conn.commit()
-        conn.close()
+    if st.button("🗑️ Clear Cloud Database"):
+        clear_db()
         st.success("Database cleared.")
         time.sleep(1)
         st.rerun()
@@ -170,7 +187,7 @@ tab1, tab2 = st.tabs(["📤 Upload (Build Bank)", "📝 Take Quiz"])
 # === TAB 1: GENERATE ===
 with tab1:
     st.header("Build Question Bank")
-    st.info("Upload PDF. Google Gemini will read it (including Scans) and generate 40 questions.")
+    st.info("Upload PDF. Questions are saved to Supabase (Cloud) and persist forever.")
     
     gen_subject = st.selectbox("Subject", ["中文 (Chinese)", "英文 (English)", "數學 (Math)", "人文科學 (Humanities)"], key="gen_sub")
     uploaded_file = st.file_uploader("Upload Notes (PDF)", type=["pdf"])
@@ -183,13 +200,13 @@ with tab1:
             progress = st.progress(0)
             
             status.write("Uploading to AI...")
+            # Temp file logic for Gemini Upload
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
                 tmp_path = tmp_file.name
 
             try:
                 sample_file = genai.upload_file(path=tmp_path, display_name="Class Notes")
-                
                 while sample_file.state.name == "PROCESSING":
                     time.sleep(1)
                     sample_file = genai.get_file(sample_file.name)
@@ -197,7 +214,7 @@ with tab1:
                 if sample_file.state.name == "FAILED":
                     raise ValueError("AI failed to process file.")
                 
-                status.write("File Ready. Generating Questions...")
+                status.write("File Ready. Generating...")
                 total_added = 0
                 
                 for i in range(4):
@@ -209,7 +226,7 @@ with tab1:
                     progress.progress((i + 1) / 4)
                     time.sleep(1) 
                 
-                status.success(f"✅ Success! Added {total_added} questions.")
+                status.success(f"✅ Saved {total_added} questions to Cloud Database!")
                 genai.delete_file(sample_file.name)
                 time.sleep(2)
                 st.rerun()
@@ -231,9 +248,9 @@ with tab2:
         questions = get_random_quiz(quiz_subject, limit=20)
         
         if not questions:
-            st.warning("No questions found. Please upload notes first.")
+            st.warning("No questions found in Cloud DB.")
         else:
-            # RESET EVERYTHING
+            # RESET
             st.session_state.current_quiz = questions
             st.session_state.quiz_submitted = False
             st.session_state.quiz_session_id = int(time.time())
@@ -246,7 +263,6 @@ with tab2:
         with st.form("quiz_form"):
             for idx, q in enumerate(st.session_state.current_quiz):
                 st.markdown(f"**{idx+1}. {q['question']}**")
-                
                 st.radio(
                     "Select Answer:", 
                     q['options'], 
