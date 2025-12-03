@@ -6,18 +6,39 @@ import json
 # 1. Configure Page
 st.set_page_config(page_title="Note-to-Quiz", page_icon="📚")
 
-# 2. Sidebar for API Key
+# --- SIDEBAR: SETTINGS & MODEL SELECTOR ---
 with st.sidebar:
     st.header("Settings")
-    api_key = st.text_input("Enter Google Gemini API Key", type="password")
+    api_key = st.text_input("Enter Gemini API Key", type="password")
+    
+    selected_model = None
     
     if api_key:
-        genai.configure(api_key=api_key)
-    
-    st.markdown("---")
-    st.markdown("**How to use:**\n1. Enter API Key\n2. Upload PDF\n3. Select Subject\n4. Take Quiz!")
+        try:
+            # Configure the API with the key
+            genai.configure(api_key=api_key)
+            
+            # DYNAMICALLY FETCH AVAILABLE MODELS
+            # This asks Google: "What models can I use?"
+            models_list = []
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    models_list.append(m.name)
+            
+            if models_list:
+                # Let user choose from the valid list
+                selected_model = st.selectbox("Select AI Model", models_list, index=0)
+                st.success(f"Connected! Found {len(models_list)} models.")
+            else:
+                st.error("Key accepted, but no models found. (Region blocked?)")
+                
+        except Exception as e:
+            st.error(f"Invalid Key: {e}")
 
-# 3. Main App Logic
+    st.markdown("---")
+    st.markdown("**How to use:**\n1. Enter API Key\n2. Select Model\n3. Upload PDF\n4. Generate Quiz!")
+
+# --- MAIN APP LOGIC ---
 st.title("📚 AI Note-to-Quiz Portal")
 
 if "quiz_data" not in st.session_state:
@@ -39,7 +60,7 @@ def extract_text_from_pdf(file):
         st.error(f"Error reading PDF: {e}")
         return None
 
-def generate_quiz(text, subject):
+def generate_quiz(text, subject, model_name):
     prompt = f"""
     You are a strict teacher. 
     Subject: {subject}
@@ -65,8 +86,8 @@ def generate_quiz(text, subject):
     """
     
     try:
-        # --- FIX IS HERE: Changed model name to the specific version ---
-        model = genai.GenerativeModel('gemini-pro') 
+        # Use the model selected from the dropdown
+        model = genai.GenerativeModel(model_name) 
         response = model.generate_content(prompt)
         
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
@@ -76,12 +97,12 @@ def generate_quiz(text, subject):
         return None
 
 # Generate Button
-if uploaded_file and api_key:
+if uploaded_file and api_key and selected_model:
     if st.button("Generate Quiz"):
-        with st.spinner("Analyzing PDF..."):
+        with st.spinner(f"Analyzing PDF using {selected_model}..."):
             text = extract_text_from_pdf(uploaded_file)
             if text:
-                quiz = generate_quiz(text, subject)
+                quiz = generate_quiz(text, subject, selected_model)
                 if quiz:
                     st.session_state.quiz_data = quiz
                     st.session_state.score_submitted = False
@@ -91,7 +112,6 @@ if uploaded_file and api_key:
 if st.session_state.quiz_data:
     st.markdown("### 📝 Quiz Time")
     
-    # We use a form so the page doesn't reload on every click
     with st.form(key='quiz_form'):
         for i, q in enumerate(st.session_state.quiz_data):
             st.markdown(f"**Q{i+1}: {q['question']}**")
@@ -110,7 +130,6 @@ if st.session_state.quiz_data:
             st.session_state.score_submitted = True
             st.rerun()
 
-    # Show Results OUTSIDE the form so they persist
     if st.session_state.score_submitted:
         st.divider()
         st.subheader("Results")
@@ -137,5 +156,4 @@ if st.session_state.quiz_data:
             st.rerun()
 
 elif not api_key:
-    st.warning("👈 Please enter your Google API Key in the sidebar to start.")
-
+    st.warning("👈 Please enter your Google API Key in the sidebar.")
